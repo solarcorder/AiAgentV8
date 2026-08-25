@@ -30,6 +30,16 @@ from typing import Any
 from app.agent.providers.base import ModelMessage, ModelProvider, ModelResponse
 from app.config import AIProvider, ModelClass, get_settings
 
+# $ per token, from the master spec's §17.2 pricing table (Aug 2026
+# snapshot, itself flagged "re-verify against ai.google.dev/pricing" —
+# Google restructured pricing at I/O 2026 and several rates carry
+# scheduled increases). Not live-verified by any tool in this codebase.
+_PRICING_PER_TOKEN: dict[ModelClass, tuple[Decimal, Decimal]] = {
+    ModelClass.CHEAP: (Decimal("0.0000001"), Decimal("0.0000004")),  # gemini-3.5-flash-lite: $0.10 / $0.40 per 1M
+    ModelClass.STANDARD: (Decimal("0.0000015"), Decimal("0.000009")),  # gemini-3.5-flash: $1.50 / $9.00 per 1M
+    ModelClass.REASONING: (Decimal("0.000002"), Decimal("0.000012")),  # gemini-3.1-pro: $2.00 / $12.00 per 1M (<200K ctx)
+}
+
 
 class GeminiNotPaidTierError(RuntimeError):
     """Raised at boot if the OPERATOR's gemini_billing_enabled is False — see RC-7 / FF-6."""
@@ -60,6 +70,10 @@ class GeminiProvider(ModelProvider):
 
     def _resolve_model_id(self, model_class: ModelClass) -> str:
         return self._settings.model_routing[AIProvider.GEMINI.value][model_class.value]
+
+    def estimate_cost_usd(self, *, model_class: ModelClass, input_tokens: int, output_tokens: int) -> Decimal:
+        input_price, output_price = _PRICING_PER_TOKEN[model_class]
+        return (Decimal(input_tokens) * input_price) + (Decimal(output_tokens) * output_price)
 
     async def complete(
         self,

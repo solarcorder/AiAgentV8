@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.v1 import ai_providers, approvals, health, properties
+from app.api.v1 import ai_providers, approvals, conversations, health, properties
 from app.config import get_settings
 from app.db.boot_assertions import assert_tenant_isolation_invariants
 from app.db.session import get_engine
@@ -48,6 +48,7 @@ def create_app() -> FastAPI:
     app.include_router(properties.router)
     app.include_router(approvals.router)
     app.include_router(ai_providers.router)
+    app.include_router(conversations.router)
 
     return app
 

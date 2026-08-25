@@ -51,7 +51,8 @@ app/
   agent/
     providers/              Multi-provider AI: GPT, Claude, Perplexity, DeepSeek, Gemini behind one interface
     budget.py               Atomic budget caps (RC-4, fixes FF-5)
-    tools/                  Tool executor — re-derives org_id, capability + risk-tier gate
+    conversation_service.py  The chat turn: resolve conversation -> turn cap -> resolve provider -> reserve budget -> call -> persist
+    tools/                  Tool executor — re-derives org_id, capability + risk-tier gate (not yet wired to the chat turn — no domain tool exists yet)
   integrations/            BYO-Twilio (RC-1, fixes FF-1); authenticated inbound email + quarantine (RC-3, fixes FF-4)
   api/v1/                 FastAPI routes — no endpoint ever accepts org_id (§20)
 migrations/               Alembic — 0001 creates the full schema + RLS + composite FKs in one gated migration
@@ -94,6 +95,26 @@ DeepSeek model IDs and pricing are **explicitly marked PLACEHOLDER** in
 tool for those three in this codebase; re-check each provider's own
 current docs before routing real traffic to them.
 
+### Chat endpoint (`POST /v1/conversations`, `POST /v1/conversations/{id}/messages`)
+
+The first thing that actually calls the provider registry end-to-end.
+`app/agent/conversation_service.py` runs each turn: resolve the
+conversation (must belong to the authenticated user — §17.5's fix for
+S3, the legacy system's guessable client-supplied session key), hard-stop
+at `settings.max_turns_per_conversation` (RC-4 control #3), resolve the
+org's provider (an explicit `provider` in the request body wins if
+connected, else the registry's 0/1/2+ rule), reserve a conservative
+budget estimate atomically *before* the call (RC-4 control #4, refunded
+in full if the call fails, reconciled to the real metered cost
+otherwise), then persist both turns.
+
+Every call goes out with `tools_enabled=False`. The tool executor
+(`app/agent/tools/executor.py`) is correct and tested but has nothing to
+call yet — no domain tool (list_properties, log_maintenance_request,
+etc.) has been implemented against the tool registry
+(`app/agent/tools/registry.py`). Wiring a tool-enabled loop ahead of
+having a single real tool would be a doorway into an empty room.
+
 ## What is deliberately NOT here yet
 
 This is a scaffold of the parts that gate everything else, not a
@@ -105,10 +126,9 @@ finished SaaS. Explicitly out of scope for this pass:
   this scaffold doesn't have. Anthropic, OpenAI, Perplexity, and
   DeepSeek's `complete()` calls ARE real and working (given a valid org
   key) — see the multi-provider section above.
-- The actual chat/agent-turn endpoint that would call `resolve_provider_for_org`
-  and drive a multi-turn tool loop (Phase 6 in the migration plan). The
-  provider registry, budget system, and tool executor all exist and are
-  tested in isolation; nothing yet wires them together into one endpoint.
+- A tool-enabled agentic loop on the chat endpoint — see the Chat
+  endpoint section above. The turn itself is real and tested; there are
+  no domain tools implemented against the tool registry yet for it to call.
 - Live key validation on `POST /v1/ai-providers/{provider}/connect` —
   today it's a key-prefix format hint only, not a real test call to the
   provider. Catches obvious paste errors, not a wrong-but-valid-looking key.

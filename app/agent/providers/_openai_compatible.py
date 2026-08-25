@@ -37,6 +37,10 @@ class OpenAICompatibleProvider(ModelProvider):
     def _resolve_model_id(self, model_class: ModelClass) -> str:
         return self._settings.model_routing[self.name][model_class.value]
 
+    def estimate_cost_usd(self, *, model_class: ModelClass, input_tokens: int, output_tokens: int) -> Decimal:
+        input_price, output_price = self._PRICING_PER_TOKEN.get(model_class, (Decimal(0), Decimal(0)))
+        return (Decimal(input_tokens) * input_price) + (Decimal(output_tokens) * output_price)
+
     async def complete(
         self,
         *,
@@ -72,8 +76,9 @@ class OpenAICompatibleProvider(ModelProvider):
             tool_calls.append(ToolCallRequest(tool_name=tc.function.name, arguments=json.loads(tc.function.arguments)))
 
         usage = response.usage
-        input_price, output_price = self._PRICING_PER_TOKEN.get(model_class, (Decimal(0), Decimal(0)))
-        cost = (Decimal(usage.prompt_tokens) * input_price) + (Decimal(usage.completion_tokens) * output_price)
+        cost = self.estimate_cost_usd(
+            model_class=model_class, input_tokens=usage.prompt_tokens, output_tokens=usage.completion_tokens
+        )
 
         return ModelResponse(
             content=choice.message.content,

@@ -95,3 +95,16 @@ class ModelProvider(abc.ABC):
         doesn't need an `isinstance` check to request it — it either does
         something or it's a no-op, never an error.
         """
+
+    @abc.abstractmethod
+    def estimate_cost_usd(self, *, model_class: ModelClass, input_tokens: int, output_tokens: int) -> Decimal:
+        """
+        Pure, no network call. Used by the caller (app/api/v1/
+        conversations.py) to compute the conservative pre-call estimate
+        RC-4's atomic budget reservation requires — reserve BEFORE the
+        provider call, using a worst-case token count, then reconcile
+        against the real `cost_estimate_usd` the call actually returns
+        (app/agent/budget.py's reconcile_actual_cost). `complete()`
+        implementations call this too, so the pricing table lives in
+        exactly one place per provider.
+        """
