@@ -36,3 +36,9 @@ class Org(Base, TimestampMixin, SoftDeleteMixin):
         nullable=False,
         default=OrgStatus.TRIALING,
     )
+    # Which connected AI provider auto-routing uses when this org has 2+
+    # providers connected (app/agent/providers/registry.py). NULL is valid
+    # and means "no default chosen yet" — the registry then requires an
+    # explicit provider on the request rather than guessing. Not an FK:
+    # values come from the fixed app.config.AI_PROVIDERS list, not a table.
+    default_ai_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
