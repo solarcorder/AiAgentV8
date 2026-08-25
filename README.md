@@ -48,23 +48,70 @@ app/
   credentials/            Envelope-encrypted vault with PER-ORG KMS keys (RC-2, fixes FF-2)
   approvals/               Human-in-the-loop approval service, token withheld from the model (§18.3, RC-6)
   jobs/                    Postgres-backed queue, FOR UPDATE SKIP LOCKED, reaper (§22, fixes W3)
-  agent/                  Model provider abstraction, atomic budget caps (RC-4, fixes FF-5), tool executor
+  agent/
+    providers/              Multi-provider AI: GPT, Claude, Perplexity, DeepSeek, Gemini behind one interface
+    budget.py               Atomic budget caps (RC-4, fixes FF-5)
+    tools/                  Tool executor — re-derives org_id, capability + risk-tier gate
   integrations/            BYO-Twilio (RC-1, fixes FF-1); authenticated inbound email + quarantine (RC-3, fixes FF-4)
   api/v1/                 FastAPI routes — no endpoint ever accepts org_id (§20)
 migrations/               Alembic — 0001 creates the full schema + RLS + composite FKs in one gated migration
 tests/                    The cross-tenant isolation suite (§28) — the gate for everything downstream
 ```
 
+### Multi-provider AI (GPT, Claude, Perplexity, DeepSeek, Gemini)
+
+Extends §17.3's provider abstraction from Gemini-only to five providers
+behind the same `ModelProvider` interface (`app/agent/providers/base.py`).
+Every provider except Gemini is **strictly BYO**: the org connects and
+pays for its own key via `POST /v1/ai-providers/{provider}/connect`
+(stored per-org in the existing credential vault — `org_credentials` and
+`org_integrations` needed zero schema change, they were already
+provider-agnostic). This mirrors RC-1's BYO-Twilio reasoning exactly:
+liability and cost sit with whoever's key is actually being billed.
+Gemini alone keeps an operator-paid fallback (`GEMINI_API_KEY` in
+`.env`) so a new org isn't dead on arrival before connecting anything.
+
+Selection (`app/agent/providers/registry.py`):
+- 0 connected providers → operator Gemini fallback, if configured.
+- 1 connected → used automatically.
+- 2+ connected → `orgs.default_ai_provider` if set, else the caller must
+  pass an explicit provider (`AmbiguousProviderError`) — never guessed.
+- `GET /v1/ai-providers` returns every known provider with this org's
+  connection state, for a UI that highlights connected providers and
+  shows the rest as placeholders.
+
+"The AI answer that appears in a Google search" is Gemini's own
+**Search-grounding** feature (`enable_search_grounding=True`, live
+Google Search results with citations) — not a separate provider, and
+deliberately not a scrape of Google's search-results page, which would
+violate Google's ToS and is fragile/blockable by design (the same
+category of thing §12.1 already ruled out for reading Gmail directly).
+
+Anthropic's model IDs and pricing (`app/agent/providers/anthropic_provider.py`)
+are live-verified via the `claude-api` skill. OpenAI, Perplexity, and
+DeepSeek model IDs and pricing are **explicitly marked PLACEHOLDER** in
+`app/config.py` and each provider file — there's no live-verification
+tool for those three in this codebase; re-check each provider's own
+current docs before routing real traffic to them.
+
 ## What is deliberately NOT here yet
 
 This is a scaffold of the parts that gate everything else, not a
 finished SaaS. Explicitly out of scope for this pass:
 
-- Real provider SDK calls (Gemini, Twilio, a real inbound-email provider,
-  Google OAuth). `app/agent/provider.py` and `app/integrations/*` define
-  the correct interfaces and raise `NotImplementedError` where a real API
-  call belongs — wiring those up needs real vendor credentials this
-  scaffold doesn't have.
+- Real provider SDK calls for Gemini, Twilio, a real inbound-email
+  provider, and Google OAuth — each raises `NotImplementedError` where a
+  real API call belongs; wiring those up needs real vendor credentials
+  this scaffold doesn't have. Anthropic, OpenAI, Perplexity, and
+  DeepSeek's `complete()` calls ARE real and working (given a valid org
+  key) — see the multi-provider section above.
+- The actual chat/agent-turn endpoint that would call `resolve_provider_for_org`
+  and drive a multi-turn tool loop (Phase 6 in the migration plan). The
+  provider registry, budget system, and tool executor all exist and are
+  tested in isolation; nothing yet wires them together into one endpoint.
+- Live key validation on `POST /v1/ai-providers/{provider}/connect` —
+  today it's a key-prefix format hint only, not a real test call to the
+  provider. Catches obvious paste errors, not a wrong-but-valid-looking key.
 - Billing (Stripe), the frontend, the operator/admin console, rate
   limiting middleware, and most of Phase 5–9 in the migration plan.
 - A real KMS integration (`app/credentials/kms.py`'s `GCPKMSProvider` is

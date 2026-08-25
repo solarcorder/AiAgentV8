@@ -25,6 +25,27 @@ LEVEL SECURITY, the policies themselves, and the worker role's
 jobs-only exception — is written explicitly in app/db/rls.py (shared
 with tests/conftest.py, which builds the same schema directly against a
 disposable test database without going through Alembic).
+
+**Consequence worth naming explicitly, found the hard way**: because
+this migration calls `create_all()` against LIVE model metadata rather
+than a frozen historical snapshot, it silently picks up every column
+anyone adds to an existing model file — there is no real "as of 0001"
+schema separate from "whatever app/domain/models/ says today." A second
+migration (`0002`) was briefly written by hand to `ADD COLUMN
+orgs.default_ai_provider` after that column was added to `org.py`, and
+promptly failed with `DuplicateColumn` on a fresh database, because 0001
+had already created it. It was deleted rather than fixed — squashing an
+unreleased migration is correct when nothing has actually been deployed
+against it yet, which is true for every commit up to and including this
+one. **This stops being true the moment a real environment has run `alembic
+upgrade head` against production or staging data.** From that point on,
+every schema change to an existing table needs a real incremental
+migration (`op.add_column`, etc.) — the red-team review's expand/contract
+policy (item 18 in its consolidated list) — because 0001 will no longer
+be re-run from scratch against a database that already has its own
+history. Whoever adds the first real incremental migration after a real
+deploy should delete this note; until then, it is live guidance, not
+history.
 """
 from __future__ import annotations
 
