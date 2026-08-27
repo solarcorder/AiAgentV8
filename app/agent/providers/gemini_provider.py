@@ -58,11 +58,17 @@ class GeminiProvider(ModelProvider):
         # the connecting org's own account and risk, not this codebase's
         # compliance surface to police.
         is_operator_key = is_operator_key or (api_key is None)
-        if is_operator_key and settings.env == "production" and not settings.gemini_billing_enabled:
+        if (
+            is_operator_key
+            and settings.env == "production"
+            and not settings.gemini_billing_enabled
+            and not settings.gemini_free_tier_risk_accepted
+        ):
             raise GeminiNotPaidTierError(
                 "refusing to serve the operator Gemini fallback: GEMINI_BILLING_ENABLED is not set. "
                 "Non-paid-tier Gemini content may be used to improve Google's products and reviewed by "
-                "humans (FF-6) — verify the configured project/key is on the paid tier first."
+                "humans (FF-6) — verify the configured project/key is on the paid tier first, or set "
+                "GEMINI_FREE_TIER_RISK_ACCEPTED=true to explicitly accept that risk for the free tier."
             )
 
         self._api_key = resolved_key

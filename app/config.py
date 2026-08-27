@@ -115,10 +115,19 @@ class Settings(BaseSettings):
     db_pool_size: int = 10
     db_pool_max_overflow: int = 5
 
-    # §10: with a transaction-mode pooler SET LOCAL is unsafe unless it runs
-    # inside the same transaction as the query. Set this to True only after
-    # verifying pooler behaviour against test 13 in tests/test_tenant_isolation.py.
-    db_pooler_verified_transaction_safe: bool = False
+    # §10: with a transaction-mode external pooler (PgBouncer/Supavisor in
+    # `pool_mode=transaction`), SET LOCAL is unsafe unless it runs inside
+    # the same transaction as the query it scopes. Deployment decision
+    # (2026-08-27): this stays self-hosted Postgres, reached directly by
+    # SQLAlchemy's own asyncpg pool (app/db/session.py) with no external
+    # transaction-mode pooler in front of it — SQLAlchemy hands each
+    # session.begin() a dedicated physical connection for the life of that
+    # transaction, so `SET LOCAL`/`set_config(..., true)` is safe by
+    # construction under this topology. Flip this back to False (and
+    # re-run test 13 in tests/test_tenant_isolation.py) the moment
+    # PgBouncer/Supavisor transaction-mode pooling is introduced in front
+    # of Postgres — that is the one change that would invalidate this.
+    db_pooler_verified_transaction_safe: bool = True
 
     # --- Auth (buy, don't build — §11) ---------------------------------
     auth_jwks_url: str | None = None
@@ -146,6 +155,24 @@ class Settings(BaseSettings):
     gemini_billing_enabled: bool = Field(
         default=False,
         description="Set true only once the configured Gemini project/key is verified paid-tier.",
+    )
+    # Deployment decision (2026-08-27): the operator key runs on free-tier
+    # models (e.g. gemini-3.5-flash) deliberately, not by accident. RC-7's
+    # gate must not be silently bypassed for that — FF-6 is still a real
+    # risk (Google's non-paid tier permits using submitted content to
+    # improve its products and allows human review; occupant data is
+    # personal information). This flag is the explicit, logged acceptance
+    # of that risk for the free tier, the same "gated exception, not a
+    # silent default" pattern as settings.twilio_mode == "subaccount".
+    # Setting it does NOT relax anything else in RC-7 — a BYO org key's
+    # tier is still that org's own responsibility, and this only ever
+    # applies to the operator's own gemini_api_key.
+    gemini_free_tier_risk_accepted: bool = Field(
+        default=False,
+        description=(
+            "Explicit override: allow the operator Gemini fallback to run in production on a "
+            "free-tier key/project despite RC-7 (FF-6 data-handling risk knowingly accepted)."
+        ),
     )
     # Gemini's Search-grounding mode (live Google Search results feeding the
     # answer, with citations) — the closest legitimate, ToS-compliant match

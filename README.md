@@ -50,9 +50,11 @@ app/
   jobs/                    Postgres-backed queue, FOR UPDATE SKIP LOCKED, reaper (§22, fixes W3)
   agent/
     providers/              Multi-provider AI: GPT, Claude, Perplexity, DeepSeek, Gemini behind one interface
+                              validation.py: live key check on connect (§ below)
     budget.py               Atomic budget caps (RC-4, fixes FF-5)
     conversation_service.py  The chat turn: resolve conversation -> turn cap -> resolve provider -> reserve budget -> call -> persist
-    tools/                  Tool executor — re-derives org_id, capability + risk-tier gate (not yet wired to the chat turn — no domain tool exists yet)
+    tools/                  Tool executor — re-derives org_id, capability + risk-tier gate
+                              domain_tools.py: list_properties, the first registered domain tool (not yet wired into the chat turn's loop — see Chat endpoint section)
   integrations/            BYO-Twilio (RC-1, fixes FF-1); authenticated inbound email + quarantine (RC-3, fixes FF-4)
   api/v1/                 FastAPI routes — no endpoint ever accepts org_id (§20)
 migrations/               Alembic — 0001 creates the full schema + RLS + composite FKs in one gated migration
@@ -108,12 +110,18 @@ budget estimate atomically *before* the call (RC-4 control #4, refunded
 in full if the call fails, reconciled to the real metered cost
 otherwise), then persist both turns.
 
-Every call goes out with `tools_enabled=False`. The tool executor
-(`app/agent/tools/executor.py`) is correct and tested but has nothing to
-call yet — no domain tool (list_properties, log_maintenance_request,
-etc.) has been implemented against the tool registry
-(`app/agent/tools/registry.py`). Wiring a tool-enabled loop ahead of
-having a single real tool would be a doorway into an empty room.
+Every call still goes out with `tools_enabled=False`. The tool executor
+(`app/agent/tools/executor.py`) now has its first real tool —
+`list_properties` (`app/agent/tools/domain_tools.py`), registered against
+the tool registry (`app/agent/tools/registry.py`) and covered end to end
+in `tests/test_domain_tools.py` (org-id re-derivation, arg validation,
+capability gate, memoization). What's still missing is the multi-iteration
+agentic loop itself: `conversation_service.send_message` makes one
+`complete()` call and persists the result — it does not yet inspect
+`ModelResponse.tool_calls`, dispatch them through `ToolExecutor.execute()`,
+feed results back as `tool` messages, or loop up to
+`max_tool_iterations_per_turn`. That loop is the next piece of real
+scope, now that there's an actual tool for it to call.
 
 ## What is deliberately NOT here yet
 
@@ -129,9 +137,15 @@ finished SaaS. Explicitly out of scope for this pass:
 - A tool-enabled agentic loop on the chat endpoint — see the Chat
   endpoint section above. The turn itself is real and tested; there are
   no domain tools implemented against the tool registry yet for it to call.
-- Live key validation on `POST /v1/ai-providers/{provider}/connect` —
-  today it's a key-prefix format hint only, not a real test call to the
-  provider. Catches obvious paste errors, not a wrong-but-valid-looking key.
+- Live key validation on `POST /v1/ai-providers/{provider}/connect` is
+  now real for Anthropic, OpenAI, Perplexity, and DeepSeek
+  (`app/agent/providers/validation.py`) — a minimal `models.list()` call
+  against the provider's own API, raising only on a confirmed
+  authentication failure (never on an ambiguous/network error, so a flaky
+  check can't block a legitimate key). Gemini is NOT covered: no Gemini
+  SDK dependency is installed and `GeminiProvider.complete()` itself
+  isn't wired to a real SDK yet (see below) — validating a BYO Gemini key
+  is a follow-up tied to that, not a gap unique to this module.
 - Billing (Stripe), the frontend, the operator/admin console, rate
   limiting middleware, and most of Phase 5–9 in the migration plan.
 - A real KMS integration (`app/credentials/kms.py`'s `GCPKMSProvider` is
@@ -141,25 +155,57 @@ finished SaaS. Explicitly out of scope for this pass:
   credentials.
 - Cache-key tenancy rules (no Redis yet — nothing to scope).
 
+## Decisions since the initial scaffold (2026-08-27)
+
+- **Database: stays self-hosted PostgreSQL.** No managed provider
+  (Supabase/Neon/Railway) — the existing `docker-compose.yml` +
+  `scripts/create_roles.sql` setup is the deployment target, not a dev-only
+  stand-in. This is also *why* `db_pooler_verified_transaction_safe` now
+  defaults to `true` — see item 3 below.
+- **Auth: WorkOS AuthKit** (`app/config.py`'s `auth_jwks_url` /
+  `auth_issuer` / `auth_audience`, `.env.example` has the exact values).
+  Free up to 1M MAU, and its Organizations/Users model maps directly onto
+  this schema's `org_id` + `memberships` design. `app/auth/jwks.py` now
+  does real JWKS fetch/cache/`kid`-lookup/signature verification — the
+  previous code passed the JWKS URL straight into `jose.jwt.decode()`'s
+  `key=` argument, which would have failed the first time a real provider
+  was wired up.
+- **Messaging: BYO-Twilio is final**, not just the current default —
+  subaccount mode (`app/integrations/twilio_adapter.py`) stays
+  unimplemented on purpose; see that file's docstring for why the
+  red team disqualified it.
+- **Gemini: running the operator fallback on free-tier models** (Flash /
+  Flash-Lite) deliberately. RC-7's boot gate is not bypassed for this —
+  `GEMINI_FREE_TIER_RISK_ACCEPTED=true` is an explicit, logged acceptance
+  of FF-6's data-handling risk (Google's non-paid tier may use submitted
+  content to improve its products and allows human review), the same
+  "gated exception, not a silent default" pattern as
+  `twilio_mode=="subaccount"`. Revisit before any real occupant PII goes
+  through this path.
+
 ## Before you build on this
 
 The red-team review's blockers list still applies. In particular, do
 these before processing any real customer data, in this order (per the
 review's §30):
 
-1. **Verify the tier of any live Gemini key.** `GeminiProvider` refuses
-   to start in production unless `GEMINI_BILLING_ENABLED=true` (RC-7),
-   but that flag is only as honest as whoever set it.
+1. **Verify the tier of any live Gemini key**, or consciously accept the
+   free-tier risk — see the decisions log above.
+   `GEMINI_BILLING_ENABLED=true` OR `GEMINI_FREE_TIER_RISK_ACCEPTED=true`
+   is required before `GeminiProvider` will boot in production; both are
+   only as honest as whoever set them.
 2. **Send the n8n licensing email** if n8n is retained for any purpose —
    see the master spec §0 and §15. Nothing in this repo touches n8n.
-3. **Verify Postgres pooler behavior with `SET LOCAL`** against whatever
-   managed Postgres you actually deploy to — `app/db/session.py`'s
-   `tenant_session()` depends on it, and
-   `settings.db_pooler_verified_transaction_safe` defaults to `false`
-   for a reason.
-4. Decide BYO-Twilio vs. subaccounts consciously — `app/integrations/
-   twilio_adapter.py` refuses subaccount mode until FF-1's mitigations
-   are actually implemented, not just configured.
+   (Done — see the decisions log in this session's history.)
+3. Postgres pooler behavior with `SET LOCAL`:
+   `settings.db_pooler_verified_transaction_safe` now defaults to `true`
+   on the strength of the self-hosted-Postgres decision above (no
+   external transaction-mode pooler in front of it — SQLAlchemy's own
+   asyncpg pool gives each transaction a dedicated connection). Flip it
+   back to `false` and re-run test 13 in
+   `tests/test_tenant_isolation.py` the moment PgBouncer/Supavisor
+   transaction-mode pooling is introduced.
+4. BYO-Twilio vs. subaccounts is decided (BYO) — see the decisions log.
 
 ## Running it locally
 

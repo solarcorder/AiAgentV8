@@ -30,6 +30,11 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     configure_logging(settings.log_level)
 
+    # Registers every domain tool against app/agent/tools/registry.py as
+    # an import-time side effect (see that module's docstring) — must
+    # happen before any request can reach the tool executor.
+    import app.agent.tools.domain_tools
+
     # Import every domain model so its table is registered on Base's
     # metadata before boot_assertions queries pg_catalog for it.
     import app.domain.models  # noqa: F401

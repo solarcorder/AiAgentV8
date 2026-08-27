@@ -2,10 +2,11 @@
 FastAPI dependencies implementing the authenticate -> resolve org chain.
 
 Session verification is a thin JWKS-based JWT check against whatever
-provider is bought (§11: Supabase Auth / Clerk / WorkOS all issue a
-verifiable JWT). This is intentionally minimal — the point of buying
-authentication is not re-implementing password hashing, MFA, or social
-login here.
+provider is bought (§11: WorkOS AuthKit is the chosen provider — see
+.env.example — though Supabase Auth / Clerk would work identically here,
+since all three issue a standard JWKS-verifiable JWT). This is
+intentionally minimal — the point of buying authentication is not
+re-implementing password hashing, MFA, or social login here.
 """
 from __future__ import annotations
 
@@ -13,13 +14,14 @@ import uuid
 from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request, status
-from jose import JWTError, jwt
+from jose.exceptions import JWTError
+from sqlalchemy import select
 
+from app.auth.jwks import JWKSFetchError, verify_jwt
 from app.auth.models import User
 from app.config import get_settings
 from app.db.session import system_session
 from app.tenancy.context import NoActiveMembershipError, TenantContext, resolve_tenant_context
-from sqlalchemy import select
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,16 +60,13 @@ async def get_current_auth_user(request: Request) -> AuthenticatedUser:
         )
 
     try:
-        # NOTE: production should cache the JWKS fetch; omitted here for
-        # scaffold clarity. python-jose fetches per verification otherwise.
-        claims = jwt.decode(
+        claims = await verify_jwt(
             token,
-            key=settings.auth_jwks_url,  # placeholder: swap for a cached JWKSClient in production
-            audience=settings.auth_audience,
+            jwks_url=settings.auth_jwks_url,
             issuer=settings.auth_issuer,
-            options={"verify_aud": settings.auth_audience is not None},
+            audience=settings.auth_audience,
         )
-    except JWTError as exc:
+    except (JWTError, JWKSFetchError) as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid session") from exc
 
     subject = claims.get("sub")

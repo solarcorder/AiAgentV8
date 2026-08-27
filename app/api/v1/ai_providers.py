@@ -20,6 +20,7 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.agent.providers.registry import list_provider_status_for_org
+from app.agent.providers.validation import ProviderKeyValidationError, validate_provider_key
 from app.auth.dependencies import require_capability
 from app.config import AI_PROVIDER_METADATA
 from app.credentials.models import OrgCredential, OrgIntegration
@@ -77,11 +78,19 @@ async def connect_ai_provider(
         # A hint, not a security control (see app/config.py) — catches an
         # obvious paste error early, same "test before it's live" spirit
         # as the onboarding flow's test-send/test-email checks elsewhere.
-        # NOT a live validation call against the provider — that is a
-        # worthwhile follow-up, not implemented here.
         raise HTTPException(
             status_code=422, detail=f"'{provider}' keys are expected to start with '{key_prefix_hint}'"
         )
+
+    # The real check: one minimal, real, read-only call against the
+    # provider's own API (app/agent/providers/validation.py). Only a
+    # confirmed authentication failure blocks the connect — an ambiguous
+    # error (network blip, unsupported probe endpoint) does not, so a
+    # legitimate key is never refused because of that.
+    try:
+        await validate_provider_key(provider, body.api_key)
+    except ProviderKeyValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     vault = CredentialVault()
     encrypted = await vault.encrypt(org_id=context.org_id, plaintext=body.api_key.encode())
